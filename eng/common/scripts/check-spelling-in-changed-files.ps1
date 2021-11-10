@@ -303,7 +303,7 @@ foreach ($file in $changedFiles) {
     $changedFilePaths += $file.Path
 }
 
-$spellingErrors = &"$PSScriptRoot/Invoke-Cspell.ps1" `
+$spellingErrors = &"$PSScriptRoot/../spelling/Invoke-Cspell.ps1" `
   -CspellConfigPath $CspellConfigPath `
   -SpellCheckRoot $SpellCheckRoot `
   -ScanGlobs $changedFilePaths

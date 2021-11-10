@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Invokes a given version of cspell with standard parameters and provided globs
+Invokes cspell using dependencies defined in adjacent ./package*.json
 
 .PARAMETER JobType
 Maps to cspell command (e.g. `lint`, `trace`, etc.). Default is `lint`
@@ -10,11 +10,6 @@ List of glob expressions to be scanned. This list is not constrained by
 npx/cmd's upper limit on command line length as the globs are inserted into the
 cspell config's `files` property.
 
-.PARAMETER Packages
-Array of strings of the form "<package>@<version>" that will be used in the npx
-run. Example: @("cspell@12.5.6", "@cspell/cspell-bundled-dicts@12.5.3"). Default
-is a basic set of packages that work together.
-
 .PARAMETER CSpellConfigPath
 Location of cspell.json file to use when scanning. Defaults to
 `.vscode/cspell.json` at the root of the repo.
@@ -22,6 +17,15 @@ Location of cspell.json file to use when scanning. Defaults to
 .PARAMETER SpellCheckRoot
 Location of root folder for generating readable relative file paths. Defaults to
 the root of the repo relative to the script.
+
+.PARAMETER WorkingDirectory
+Location of a working directory. If no location is provided a folder will be
+created in the temp folder, package*.json files will be placed in that folder.
+
+.PARAMETER LeaveWorkingDirectory
+If set the WorkingDirectory will not be deleted. Use if there are multiple
+calls to Invoke-Cspell.ps1 to prevent creating multiple working directories and
+redundant calls `npm install`.
 
 .PARAMETER Test
 Run test functions against the script logic
@@ -51,20 +55,16 @@ param(
   [array]$ScanGlobs = '**',
 
   [Parameter()]
-  [array]$CSpellPackages = @(
-    "cspell@5.12.3",
-    "cspell-lib@5.12.3",
-    "cspell-glob@5.12.3",
-    "cspell-gitignore@5.12.3",
-    "@cspell/cspell-types@5.12.3",
-    "@cspell/cspell-bundled-dicts@5.12.3"
-  ),
-
-  [Parameter()]
   [string] $CSpellConfigPath = (Resolve-Path "$PSScriptRoot/../../../.vscode/cspell.json"),
 
   [Parameter()]
   [string] $SpellCheckRoot = (Resolve-Path "$PSScriptRoot/../../.."),
+
+  [Parameter()]
+  [string] $WorkingDirectory = (Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())),
+
+  [Parameter()]
+  [switch] $LeaveWorkingDirectory,
 
   [Parameter()]
   [switch] $Test
@@ -72,8 +72,8 @@ param(
 
 Set-StrictMode -Version 3.0
 
-if ((Get-Command npx | Measure-Object).Count -eq 0) {
-  LogError "Could not locate npx. Install NodeJS (includes npx and npx) https://nodejs.org/en/download/"
+if ((Get-Command npm | Measure-Object).Count -eq 0) {
+  LogError "Could not locate npm. Install NodeJS (includes npm) https://nodejs.org/en/download/"
   exit 1
 }
 
@@ -85,18 +85,9 @@ if (!(Test-Path $CSpellConfigPath)) {
 function Test-VersionReportMatches() {
   # Arrange
   $expectedPackageVersion = '5.12.3'
-  $packages = @(
-    "cspell@$expectedPackageVersion",
-    "cspell-lib@$expectedPackageVersion",
-    "cspell-glob@$expectedPackageVersion",
-    "cspell-gitignore@$expectedPackageVersion",
-    "@cspell/cspell-types@$expectedPackageVersion",
-    "@cspell/cspell-bundled-dicts@$expectedPackageVersion"
-  )
 
   # Act
   $actual = &"$PSSCriptRoot/Invoke-Cspell.ps1" `
-    -CSpellPackages $packages `
     -JobType '--version'
 
   # Assert
@@ -115,11 +106,24 @@ if ($Test) {
   exit 0
 }
 
+# Prepare the working directory if it does not already have requirements in
+# place.
+if (!(Test-Path $WorkingDirectory)) {
+  New-Item -ItemType Directory -Path $WorkingDirectory | Out-Null
+}
+
+if (!(Test-Path "$WorkingDirectory/package.json")) {
+  Copy-Item "$PSScriptRoot/package.json" $WorkingDirectory
+}
+
+if (!(Test-Path "$WorkingDirectory/package-lock.json")) {
+  Copy-Item "$PSScriptRoot/package-lock.json" $WorkingDirectory
+}
 
 # The "files" list must always contain a file which exists, is not empty, and is
 # not excluded in ignorePaths. In this case it will be a file with the contents
 # "1" (no spelling errors will be detected)
-$notExcludedFile = (New-TemporaryFile).ToString()
+$notExcludedFile = Join-Path $SpellCheckRoot ([System.IO.Path]::GetRandomFileName())
 "1" >> $notExcludedFile
 $ScanGlobs += $notExcludedFile
 
@@ -145,19 +149,30 @@ Set-Content `
   -Path $CSpellConfigPath `
   -Value (ConvertTo-Json $cspellConfig -Depth 100)
 
-$packageParameters = @()
-foreach ($package in $CSpellPackages) {
-  $packageParameters += "--package $package"
-}
+# Before chaning the run location, resolve paths specified in parameters
+$CSpellConfigPath = Resolve-Path $CSpellConfigPath
+$SpellCheckRoot = Resolve-Path $SpellCheckRoot
 
+$originalLocation = Get-Location
 # Use the mutated configuration file when calling cspell
-$command = "npx $($packageParameters -join ' ') -- cspell $JobType --config $CSpellConfigPath --no-must-find-files --root $SpellCheckRoot --relative"
+$command = "npm exec -- cspell $JobType --config $CSpellConfigPath --no-must-find-files --root $SpellCheckRoot --relative"
 Write-Host $command
-
-$cspellOutput = Invoke-Expression $command
+$cspellOutput = npm exec -- `
+  cspell `
+  $JobType `
+  --config $CSpellConfigPath `
+  --no-must-find-files `
+  --root $SpellCheckRoot `
+  --relative
 
 Write-Host "cspell run complete, restoring original configuration and removing temp file."
 Set-Content -Path $CSpellConfigPath -Value $cspellConfigContent -NoNewLine
+
+Set-Location $originalLocation
 Remove-Item -Path $notExcludedFile
+
+if (!$LeaveWorkingDirectory) {
+  Remove-Item $WorkingDirectory -Recurse -Force
+}
 
 return $cspellOutput
